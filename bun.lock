@@ -503,6 +503,7 @@
       "version": "1.17.10",
       "bin": {
         "opencode": "./bin/opencode",
+        "ekode": "./bin/ekode",
       },
       "dependencies": {
         "@actions/core": "1.11.1",
