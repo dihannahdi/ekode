@@ -1,3 +1,21 @@
+## Local domain (`ekowork.local`)
+
+The Ekowork web app can be reached at `http://ekowork.local:<port>` (the harness runs
+the dev server on `:4444`). This is a one-time, manual setup because it edits `/etc/hosts`
+and therefore needs `sudo`:
+
+```bash
+sudo ./script/setup-local-domain.sh
+```
+
+The script appends `127.0.0.1 ekowork.local` and `::1 ekowork.local` to `/etc/hosts`
+(idempotent — safe to re-run). Once added, open `http://ekowork.local:4444` in your
+browser. Vite already accepts the `ekowork.local` Host header (`allowedHosts: true` in
+`vite.config.ts`), so no server config change is needed.
+
+Bare `http://ekowork.local` (port 80) needs a reverse proxy or a privileged port and is
+out of scope for local dev — use the explicit `:<port>` form.
+
 ## Usage
 
 Dependencies for these templates are managed with [pnpm](https://pnpm.io) using `pnpm up -Lri`.
