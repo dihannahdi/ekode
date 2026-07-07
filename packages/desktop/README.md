@@ -1,6 +1,6 @@
-# OpenCode Desktop
+# Ekowork Desktop
 
-The OpenCode Desktop app, built with Electron.
+The Ekowork Desktop app, built with Electron.
 
 ## Development
 

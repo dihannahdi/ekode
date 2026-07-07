@@ -35,7 +35,7 @@ export async function mockOpenCodeServer(page: Page, config: MockServerConfig) {
       config: config.directory,
       worktree: config.directory,
       directory: config.directory,
-      home: "C:/OpenCode",
+      home: "C:/Ekowork",
     },
     "/project": [config.project],
     "/project/current": config.project,

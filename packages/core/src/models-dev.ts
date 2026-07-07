@@ -109,6 +109,21 @@ export const Provider = Schema.Struct({
 
 export type Provider = Schema.Schema.Type<typeof Provider>
 
+// Display-name overrides applied on top of the upstream models.dev catalog so
+// forked branding shows through wherever a provider name is rendered.
+const PROVIDER_NAME_OVERRIDES: Record<string, string> = {
+  opencode: "Eko AI",
+}
+
+function applyProviderOverrides(data: Record<string, Provider>): Record<string, Provider> {
+  const result: Record<string, Provider> = {}
+  for (const [id, provider] of Object.entries(data)) {
+    const name = PROVIDER_NAME_OVERRIDES[id]
+    result[id] = name ? { ...provider, name } : provider
+  }
+  return result
+}
+
 export const Event = ModelsDev.Event
 
 declare const OPENCODE_MODELS_DEV: Record<string, Provider> | undefined
@@ -206,7 +221,7 @@ export const layer = Layer.effect(
         }),
       )
       return JSON.parse(text) as Record<string, Provider>
-    }).pipe(Effect.withSpan("ModelsDev.populate"), Effect.orDie)
+    }).pipe(Effect.map(applyProviderOverrides), Effect.withSpan("ModelsDev.populate"), Effect.orDie)
 
     const [cachedGet, invalidate] = yield* Effect.cachedInvalidateWithTTL(populate, Duration.infinity)
 
