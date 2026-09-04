@@ -62,6 +62,24 @@ export const UninstallCommand = {
 
     const targets = await collectRemovalTargets(args, method)
 
+    // This command only ever removes the binary for "curl" installs
+    // (collectRemovalTargets below). For an installer install it deletes the
+    // data, cache, config and state directories and leaves ekode.exe, the
+    // PATH entry, the Start Menu group and the Add/Remove Programs record
+    // exactly where they were -- then prints "Done", which reads as a
+    // completed uninstall. Nothing is wrong with the removal itself; the
+    // reporting is. Say plainly what stays behind and where to remove it.
+    const installerManaged = method === "installer"
+    if (installerManaged) {
+      prompts.log.warn(
+        "ekode was installed with the Windows installer, which this command cannot remove.\n" +
+          "It will delete your data and settings, and leave the program itself installed.\n\n" +
+          "To remove the program as well, use either of these instead:\n" +
+          "  Settings > Apps > Installed apps > Ekode > Uninstall\n" +
+          "  Start Menu > Ekode > Uninstall Ekode",
+      )
+    }
+
     await showRemovalSummary(targets, method)
 
     if (!args.force && !args.dryRun) {
@@ -83,7 +101,9 @@ export const UninstallCommand = {
 
     await executeUninstall(method, targets)
 
-    prompts.outro("Done")
+    // "Done" on an installer install would claim an uninstall that did not
+    // happen -- the program is still there and still on PATH.
+    prompts.outro(installerManaged ? "Data and settings removed. Ekode itself is still installed." : "Done")
   },
 }
 
