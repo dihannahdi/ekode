@@ -1,3 +1,10 @@
+// The <spinner> component is registered by a bare side-effect import
+// (`import "opentui-spinner/solid"`). Bun's `--compile` bundler ignores that
+// package's `sideEffects` allowlist and tree-shakes the registration away, so
+// the TUI crashes on first render ("Unknown component type: spinner"). Call the
+// exported registrar explicitly + first — a named import + call can't be dropped.
+import { registerSpinner } from "opentui-spinner/solid"
+registerSpinner()
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
 import { RunCommand } from "./cli/cmd/run"
