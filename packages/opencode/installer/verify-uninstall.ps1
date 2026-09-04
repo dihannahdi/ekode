@@ -101,9 +101,22 @@ function Get-StartMenu {
   $out | Sort-Object
 }
 
+function Invoke-Native([scriptblock]$Command) {
+  # Windows PowerShell 5.1 turns anything a native exe writes to stderr into a
+  # NativeCommandError ErrorRecord, which is *terminating* while
+  # $ErrorActionPreference is 'Stop'. where.exe writes "INFO: Could not find
+  # files for the given pattern(s)." to stderr on a miss -- the normal baseline
+  # state here, not a failure. Drop to Continue for the call and judge the
+  # result by $LASTEXITCODE, which is what actually carries the outcome.
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try { & $Command } finally { $ErrorActionPreference = $prev }
+}
+
 function Get-WhereExe {
   $exe = [System.IO.Path]::GetFileNameWithoutExtension($ExeName)
-  $r = & where.exe $exe 2>$null
+  # redirect inside cmd so the stderr text never reaches PowerShell at all
+  $r = Invoke-Native { & cmd.exe /c "where $exe 2>nul" }
   if ($LASTEXITCODE -ne 0) { return @() }
   @($r) | Sort-Object
 }
@@ -194,7 +207,7 @@ if ($pathRow.Value -notlike "*$InstallDir\bin*") {
 }
 Write-Host "PATH entry present, $ExeName present."
 
-& $exePath --version
+Invoke-Native { & $exePath --version }
 if ($LASTEXITCODE -ne 0) { throw "$exePath --version exited $LASTEXITCODE" }
 
 # The registry entry is only half the claim. Prove a *new* shell resolves the
