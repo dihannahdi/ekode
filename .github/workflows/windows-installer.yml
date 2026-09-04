@@ -1,0 +1,164 @@
+name: windows-installer
+
+# Builds ekode.exe natively on a GitHub Windows runner, wraps it in an Inno
+# Setup installer, and proves the installer uninstalls clean.
+#
+# Deliberately separate from publish.yml: every job in that workflow is gated
+# `if: github.repository == 'anomalyco/opencode'` and runs on Blacksmith
+# runners this repo does not have, so none of it executes in a fork.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string for the installer (default: 0.0.0-ci-<run number>)"
+        required: false
+        type: string
+  push:
+    branches:
+      - feat/windows-installer
+  pull_request:
+    paths:
+      - ".github/workflows/windows-installer.yml"
+      - "packages/opencode/installer/**"
+      - "packages/opencode/script/build.ts"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # build.ts derives the channel from `git branch --show-current`, which is
+  # empty on Actions' detached-HEAD checkout. Set it so the version string is
+  # not "0.0.0--<timestamp>".
+  OPENCODE_CHANNEL: ci
+
+jobs:
+  build:
+    name: build ekode.exe (windows-x64)
+    runs-on: windows-2025
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      version_info: ${{ steps.version.outputs.version_info }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="0.0.0-ci-${{ github.run_number }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Inno's VersionInfoVersion must be numeric a.b.c.d
+          echo "version_info=0.0.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "version = $VERSION"
+
+      - name: Build
+        shell: bash
+        env:
+          OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # --single builds only the host target (windows-x64). That is also the
+          # only configuration where build.ts runs its `ekode --version` smoke
+          # test (build.ts:200 gates it on item.os === process.platform), so a
+          # native build is the only one that proves the binary actually starts.
+          bun run packages/opencode/script/build.ts --single
+
+      - name: Show what was built
+        shell: pwsh
+        run: |
+          $dir = "packages/opencode/dist/opencode-windows-x64/bin"
+          if (-not (Test-Path $dir)) { throw "Build produced nothing at $dir" }
+          Get-ChildItem $dir -Recurse -File | Select-Object FullName, Length | Format-Table -AutoSize
+          & "$dir/ekode.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "ekode.exe --version exited $LASTEXITCODE" }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ekode-windows-x64
+          path: packages/opencode/dist/opencode-windows-x64/bin
+          if-no-files-found: error
+
+  installer:
+    name: build installer
+    needs: build
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ekode-windows-x64
+          path: build/bin
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          & $iscc /? | Select-Object -First 1
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $src = (Resolve-Path "build/bin").Path
+          $out = (Resolve-Path "dist").Path
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DSourceDir=$src" `
+            "/DAppVersion=${{ needs.build.outputs.version }}" `
+            "/DVersionInfo=${{ needs.build.outputs.version_info }}" `
+            "/DOutputDir=$out" `
+            "packages\opencode\installer\ekode.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC exited $LASTEXITCODE" }
+          Get-ChildItem dist | Format-Table Name, Length -AutoSize
+
+      # --- code signing slots in here -------------------------------------
+      # Upstream signs with Azure Artifact Signing (formerly Trusted Signing);
+      # see publish.yml:120-218 for the working shape. It needs an Artifact
+      # Signing account plus a Public Trust certificate profile, which requires
+      # an *organisation* identity validation. Until that identity is settled,
+      # this step stays absent rather than half-wired, and every download shows
+      # "Windows protected your PC".
+      # --------------------------------------------------------------------
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ekode-setup-windows-x64
+          path: dist/*.exe
+          if-no-files-found: error
+
+  verify-uninstall:
+    name: verify clean uninstall
+    needs: installer
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ekode-setup-windows-x64
+          path: dist
+
+      - name: Install, diff, uninstall, diff
+        shell: powershell
+        run: |
+          $setup = Get-ChildItem dist -Filter "ekode-setup-*.exe" | Select-Object -First 1
+          if (-not $setup) { throw "No setup exe in dist" }
+          .\packages\opencode\installer\verify-uninstall.ps1 -Setup $setup.FullName -WorkDir "$env:RUNNER_TEMP\uninstall-check"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: uninstall-snapshots
+          path: ${{ runner.temp }}/uninstall-check
+          if-no-files-found: warn
