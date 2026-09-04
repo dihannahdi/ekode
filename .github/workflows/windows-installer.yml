@@ -170,7 +170,12 @@ jobs:
       # point release can change compression or [Code] semantics with no diff
       # to review, and an Inno Setup 7 would install to a different directory
       # and break the path below with no repo change at all.
-      INNO_VERSION: "6.7.3"
+      #
+      # This is the CHOCOLATEY package version, which lags upstream -- choco's
+      # newest is 6.7.1 while jrsoftware ships 6.7.3, so do not copy the
+      # version out of winget or the download page. Check what exists first:
+      #   curl -s "https://community.chocolatey.org/api/v2/FindPackagesById()?id='innosetup'&\$orderby=Version%20desc&\$top=5"
+      INNO_VERSION: "6.7.1"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
