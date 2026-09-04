@@ -39,18 +39,23 @@ permissions:
 env:
   # build.ts derives the channel from `git branch --show-current`, which is
   # empty on Actions' detached-HEAD checkout, giving "0.0.0--<timestamp>".
+  # That is the whole reason this is set. It is NOT an update-check control:
+  # cli/upgrade.ts gates only on `config.autoupdate === false` and
+  # Flag.OPENCODE_DISABLE_AUTOUPDATE -- OPENCODE_CHANNEL and IS_PREVIEW do not
+  # appear in that path at all. An earlier version of this comment claimed
+  # otherwise; it was wrong, and 'ci' does not suppress anything.
   #
-  # Deliberately NOT 'latest' on tags. Anything other than 'latest' keeps
-  # IS_PREVIEW true, which keeps the binary's update check off -- and that check
-  # is currently wrong for ekode: an installer-installed exe lives in
-  # %LOCALAPPDATA%\Programs\Ekode\bin, which Installation.method() does not
-  # recognise (installation/index.ts:174-205), so it returns "unknown",
-  # Installation.latest() falls through to its default branch and queries
-  # api.github.com/repos/anomalyco/opencode/releases/latest (index.ts:257).
-  # Users would be told forever to upgrade to upstream opencode, and
-  # `ekode upgrade` would die on "Unknown installation method: unknown".
-  # Turning the update check on needs ekode's own release endpoint and an
-  # installer-aware Method first. See the PR description.
+  # Verified by running a 0.0.0-ci-4 binary: it offers "Update Available
+  # v1.18.27", which is api.github.com/repos/anomalyco/opencode's actual latest
+  # release, because Installation.method() does not recognise
+  # %LOCALAPPDATA%\Programs\Ekode\bin (installation/index.ts:174-205) and
+  # Installation.latest() then falls to its default branch (index.ts:257).
+  # Accepting that prompt hits installation/index.ts:307 and fails with
+  # "Unknown installation method: unknown".
+  #
+  # Nothing in this workflow can fix that. It needs ekode's own release
+  # endpoint and an installer-aware Method, in shared runtime code. Until then
+  # this installer should not be released to users -- see the PR description.
   OPENCODE_CHANNEL: ci
 
 jobs:
