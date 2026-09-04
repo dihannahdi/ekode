@@ -14,7 +14,18 @@ import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/inst
 import { NpmConfig } from "@opencode-ai/core/npm-config"
 import { InstallationEvent } from "@opencode-ai/schema/installation-event"
 
-export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "unknown"
+export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "installer" | "unknown"
+
+/**
+ * The repository ekode's releases are cut from. This is the one place naming
+ * the product, so a rename or a move is a single edit.
+ *
+ * ekode is a fork and publishes to none of the package managers this module
+ * knows about -- there is no ekode on npm, brew, chocolatey or scoop. Its only
+ * distribution channel is a GitHub release plus the Windows installer, so this
+ * is what the update check has to ask.
+ */
+export const RELEASES_REPO = "jaycoolslm/ekode"
 
 export type ReleaseType = "patch" | "minor" | "major"
 
@@ -173,6 +184,14 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       method: Effect.fn("Installation.method")(function* () {
         if (process.execPath.includes(path.join(".opencode", "bin"))) return "curl" as Method
         if (process.execPath.includes(path.join(".local", "bin"))) return "curl" as Method
+
+        // The Windows installer puts the binary in {autopf}\Ekode\bin, which
+        // with PrivilegesRequired=lowest is %LOCALAPPDATA%\Programs\Ekode\bin.
+        // Checked before the package-manager probes below, because those
+        // probes ask "is opencode present on this machine" and would happily
+        // conclude an installer-installed ekode arrived via npm.
+        if (process.execPath.includes(path.join("Programs", "Ekode", "bin"))) return "installer" as Method
+
         const exec = process.execPath.toLowerCase()
 
         const checks: Array<{ name: Method; command: () => Effect.Effect<string> }> = [
@@ -253,8 +272,12 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
           return data.version
         }
 
+        // Fallback for "curl", "installer" and "unknown". This asked
+        // anomalyco/opencode, so an installer-installed ekode was told on
+        // every launch that opencode's latest release was an available
+        // upgrade -- a different product, and one it could not install.
         const response = yield* httpOk.execute(
-          HttpClientRequest.get("https://api.github.com/repos/anomalyco/opencode/releases/latest").pipe(
+          HttpClientRequest.get(`https://api.github.com/repos/${RELEASES_REPO}/releases/latest`).pipe(
             HttpClientRequest.acceptJson,
           ),
         )
@@ -298,6 +321,19 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
             upgradeResult = yield* run(["brew", "upgrade", formula], { env })
             break
           }
+          case "installer":
+            // A running exe cannot replace itself in place, and the installer
+            // also owns a PATH entry and an Add/Remove Programs record that
+            // only its own uninstaller knows how to revise. Point the user at
+            // the release rather than half-upgrading, or failing with
+            // "Unknown installation method".
+            return yield* new UpgradeFailedError({
+              stderr:
+                `ekode was installed with the Windows installer, which cannot upgrade itself in place.\n` +
+                `Download ekode-setup-${target}-x64.exe and run it over the top:\n` +
+                `  https://github.com/${RELEASES_REPO}/releases/tag/v${target}\n` +
+                `It keeps your settings and replaces the binary.`,
+            })
           case "choco":
             upgradeResult = yield* run(["choco", "upgrade", "opencode", `--version=${target}`, "-y"])
             break
