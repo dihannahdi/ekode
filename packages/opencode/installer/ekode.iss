@@ -85,6 +85,14 @@ Filename: "{cmd}"; Parameters: "/c ""{app}\bin\{#AppExeName}"" --version"; \
 const
   EnvironmentKey = 'Environment';
 
+{ Add and remove are deliberately exact inverses: add appends ";" + Path and
+  changes nothing else, remove deletes exactly those same characters. An
+  earlier version tidied a trailing ";" off the existing value on the way in,
+  which meant uninstall could not put it back -- the uninstall diff caught a
+  PATH of "...\WindowsApps;" coming back as "...\WindowsApps". Leaving a value
+  like "A;" to become "A;;C:\...\bin" looks untidy, but Windows ignores empty
+  PATH segments and the restore is byte-identical, which is what matters. }
+
 procedure EnvAddPath(Path: string);
 var
   Paths: string;
@@ -92,10 +100,8 @@ begin
   if not RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Paths) then
     Paths := '';
 
-  { a trailing ';' would otherwise produce an empty PATH segment }
-  while (Length(Paths) > 0) and (Paths[Length(Paths)] = ';') do
-    Delete(Paths, Length(Paths), 1);
-
+  { pad both sides so a segment cannot match a longer neighbour's prefix --
+    "C:\x\bin" must not be found inside "C:\x\binary" }
   if Pos(';' + Uppercase(Path) + ';', ';' + Uppercase(Paths) + ';') > 0 then
     exit;
 
@@ -109,26 +115,33 @@ end;
 
 procedure EnvRemovePath(Path: string);
 var
-  Paths: string;
+  Paths, Upper: string;
   P: Integer;
 begin
   if not RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Paths) then
     exit;
 
-  { pad both ends so the first and last segments match the same way }
-  Paths := ';' + Paths + ';';
-  P := Pos(';' + Uppercase(Path) + ';', Uppercase(Paths));
+  { match against the padded string so we never match a partial segment, but
+    delete out of the unpadded one so surrounding characters are untouched }
+  Upper := ';' + Uppercase(Paths) + ';';
+  P := Pos(';' + Uppercase(Path) + ';', Upper);
   if P = 0 then
     exit;
 
-  { P points at the leading ';'; drop "<path>;" and keep that ';' }
-  Delete(Paths, P + 1, Length(Path) + 1);
+  if P = 1 then
+  begin
+    { we are the first segment, so the ';' the match found is our own padding }
+    Delete(Paths, 1, Length(Path));
+    if (Length(Paths) > 0) and (Paths[1] = ';') then
+      Delete(Paths, 1, 1);
+  end
+  else
+    { P-1 is the real ';' preceding us in the unpadded value; take it with us }
+    Delete(Paths, P - 1, Length(Path) + 1);
 
-  { strip the padding we added }
-  Delete(Paths, 1, 1);
-  if (Length(Paths) > 0) and (Paths[Length(Paths)] = ';') then
-    Delete(Paths, Length(Paths), 1);
-
+  { An empty result means the value held nothing but our entry, so it did not
+    exist before we created it. (A value that existed as an empty string is
+    indistinguishable here and would be deleted -- the snapshot would show it.) }
   if Paths = '' then
     RegDeleteValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path')
   else
