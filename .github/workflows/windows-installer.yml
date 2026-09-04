@@ -70,7 +70,16 @@ jobs:
           # only configuration where build.ts runs its `ekode --version` smoke
           # test (build.ts:200 gates it on item.os === process.platform), so a
           # native build is the only one that proves the binary actually starts.
-          bun run packages/opencode/script/build.ts --single
+          #
+          # --skip-install because build.ts:139-143 otherwise runs its own
+          # `bun install --os="*" --cpu="*"`, which re-links node_modules with
+          # Bun's isolated linker and undoes the `--linker hoisted` layout that
+          # setup-bun applies on Windows (oven-sh/bun#28147). node-gyp then
+          # stops resolving and tree-sitter-powershell's install script dies:
+          #   Cannot find module '...\node_modules\node-gyp\bin\node-gyp.js'
+          # Those installs fetch natives for *every* target; with --single we
+          # build only the host, whose natives setup-bun already installed.
+          bun run packages/opencode/script/build.ts --single --skip-install
 
       - name: Show what was built
         shell: pwsh
