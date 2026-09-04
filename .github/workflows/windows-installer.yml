@@ -222,12 +222,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
+          # semver: a hyphen means pre-release. Without this a v1.0.0-rc1 tag
+          # publishes as "Latest" and becomes the download users land on.
+          PRERELEASE=""
+          case "${TAG#v}" in
+            *-*) PRERELEASE="--prerelease" ;;
+          esac
+
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "$TAG" \
               --verify-tag \
-              --generate-notes
+              --generate-notes \
+              $PRERELEASE
           fi
           gh release upload "$TAG" dist/*.exe dist/SHA256SUMS.txt \
             --clobber --repo "$GITHUB_REPOSITORY"
