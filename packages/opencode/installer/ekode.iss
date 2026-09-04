@@ -85,6 +85,58 @@ Filename: "{cmd}"; Parameters: "/c ""{app}\bin\{#AppExeName}"" --version"; \
 const
   EnvironmentKey = 'Environment';
 
+  { $80000001 (HKEY_CURRENT_USER) as a signed 32-bit handle }
+  HKCU_NATIVE = -2147483647;
+  KEY_READ_ = $20019;
+  REG_SZ_TYPE = 1;
+  REG_EXPAND_SZ_TYPE = 2;
+
+{ Inno's Reg* functions read REG_SZ and REG_EXPAND_SZ identically and give no
+  way to tell which one a value is. That matters: writing PATH back as
+  REG_EXPAND_SZ when it was REG_SZ is a registry change the uninstall cannot
+  undo, so "clean uninstall" would be false on any machine whose PATH is
+  REG_SZ. Go to the Win32 API for the one thing Inno cannot answer. }
+function RegOpenKeyExW(hKey: Integer; lpSubKey: string; ulOptions: Integer;
+  samDesired: Integer; var phkResult: Integer): Integer;
+  external 'RegOpenKeyExW@advapi32.dll stdcall';
+function RegQueryValueExW(hKey: Integer; lpValueName: string; lpReserved: Integer;
+  var lpType: Integer; lpData: Integer; var lpcbData: Integer): Integer;
+  external 'RegQueryValueExW@advapi32.dll stdcall';
+function RegCloseKey(hKey: Integer): Integer;
+  external 'RegCloseKey@advapi32.dll stdcall';
+
+{ Registry type of HKCU\Environment\Path: 1 = REG_SZ, 2 = REG_EXPAND_SZ,
+  0 = absent or unreadable. }
+function PathValueKind(): Integer;
+var
+  hKey, ValType, DataSize: Integer;
+begin
+  Result := 0;
+  try
+    if RegOpenKeyExW(HKCU_NATIVE, EnvironmentKey, 0, KEY_READ_, hKey) <> 0 then
+      exit;
+    ValType := 0;
+    DataSize := 0;
+    { lpData = NULL asks for the type and size only }
+    if RegQueryValueExW(hKey, 'Path', 0, ValType, 0, DataSize) = 0 then
+      Result := ValType;
+    RegCloseKey(hKey);
+  except
+    { if the import ever fails, fall through to the REG_EXPAND_SZ default
+      rather than aborting the install }
+    Result := 0;
+  end;
+end;
+
+procedure WritePathValue(Value: string; Kind: Integer);
+begin
+  if Kind = REG_SZ_TYPE then
+    RegWriteStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Value)
+  else
+    { 0 means the value did not exist; REG_EXPAND_SZ is what Windows creates }
+    RegWriteExpandStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Value);
+end;
+
 { Add and remove are deliberately exact inverses: add appends ";" + Path and
   changes nothing else, remove deletes exactly those same characters. An
   earlier version tidied a trailing ";" off the existing value on the way in,
@@ -96,7 +148,9 @@ const
 procedure EnvAddPath(Path: string);
 var
   Paths: string;
+  Kind: Integer;
 begin
+  Kind := PathValueKind();
   if not RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Paths) then
     Paths := '';
 
@@ -110,14 +164,15 @@ begin
   else
     Paths := Paths + ';' + Path;
 
-  RegWriteExpandStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Paths);
+  WritePathValue(Paths, Kind);
 end;
 
 procedure EnvRemovePath(Path: string);
 var
   Paths, Upper: string;
-  P: Integer;
+  P, Kind: Integer;
 begin
+  Kind := PathValueKind();
   if not RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Paths) then
     exit;
 
@@ -145,7 +200,7 @@ begin
   if Paths = '' then
     RegDeleteValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path')
   else
-    RegWriteExpandStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Paths);
+    WritePathValue(Paths, Kind);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
