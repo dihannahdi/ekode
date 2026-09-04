@@ -15,8 +15,6 @@ on:
         required: false
         type: string
   push:
-    branches:
-      - feat/windows-installer
     tags:
       # a tag is what publishes; see the release job at the bottom
       - "v*"
@@ -28,17 +26,32 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a tag run: the release job uploads the exe and SHA256SUMS.txt
+  # as two calls, and a cancel between them leaves a release with the installer
+  # and no checksum. Re-pushing a tag keeps the same github.ref, so without
+  # this a routine tag fix could truncate a published release. publish.yml:27
+  # omits cancel-in-progress for the same reason.
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 permissions:
   contents: read
 
 env:
   # build.ts derives the channel from `git branch --show-current`, which is
-  # empty on Actions' detached-HEAD checkout. Set it so the version string is
-  # not "0.0.0--<timestamp>". A tag build is a real release, so it gets the
-  # channel a released binary expects rather than "ci".
-  OPENCODE_CHANNEL: ${{ github.ref_type == 'tag' && 'latest' || 'ci' }}
+  # empty on Actions' detached-HEAD checkout, giving "0.0.0--<timestamp>".
+  #
+  # Deliberately NOT 'latest' on tags. Anything other than 'latest' keeps
+  # IS_PREVIEW true, which keeps the binary's update check off -- and that check
+  # is currently wrong for ekode: an installer-installed exe lives in
+  # %LOCALAPPDATA%\Programs\Ekode\bin, which Installation.method() does not
+  # recognise (installation/index.ts:174-205), so it returns "unknown",
+  # Installation.latest() falls through to its default branch and queries
+  # api.github.com/repos/anomalyco/opencode/releases/latest (index.ts:257).
+  # Users would be told forever to upgrade to upstream opencode, and
+  # `ekode upgrade` would die on "Unknown installation method: unknown".
+  # Turning the update check on needs ekode's own release endpoint and an
+  # installer-aware Method first. See the PR description.
+  OPENCODE_CHANNEL: ci
 
 jobs:
   build:
@@ -55,29 +68,62 @@ jobs:
       - name: Resolve version
         id: version
         shell: bash
+        env:
+          # Never interpolate a workflow input into the script body. GitHub
+          # substitutes ${{ }} textually before bash parses the line, so a
+          # version of "$(curl ... | bash)" would execute on the runner -- and
+          # again in the installer job, where PowerShell's $() also runs inside
+          # a double-quoted string. Passing through env keeps it data.
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
+          if [ "$REF_TYPE" = "tag" ]; then
             # v1.2.3 -> 1.2.3, so the installed name is not "Ekode v1.2.3"
             VERSION="${GITHUB_REF_NAME#v}"
-          elif [ -n "${{ inputs.version }}" ]; then
-            VERSION="${{ inputs.version }}"
+          elif [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
           else
-            VERSION="0.0.0-ci-${{ github.run_number }}"
+            VERSION="0.0.0-ci-$RUN_NUMBER"
           fi
 
-          # Inno's VersionInfoVersion must be numeric a.b.c.d. Take the leading
-          # numeric part of the version and pad it; anything without one (a ci
-          # build, a pre-release tag) falls back to the run number.
+          # VersionInfoVersion is the Windows file-version resource. It must be
+          # numeric a.b.c.d with every component <= 65535, and it is not what
+          # users see -- AppVersion carries the real string, pre-release suffix
+          # and all. The run number takes the 4th slot so 1.0.0-rc1, 1.0.0-rc2
+          # and 1.0.0 do not all collapse onto the same 1.0.0.0 and become
+          # indistinguishable in file properties.
           NUM=$(printf '%s' "$VERSION" | grep -oE '^[0-9]+(\.[0-9]+){0,2}' || true)
-          if [ -n "$NUM" ] && [ "$NUM" != "0" ] && [ "$NUM" != "0.0" ] && [ "$NUM" != "0.0.0" ]; then
-            while [ "$(printf '%s' "$NUM" | tr -cd '.' | wc -c)" -lt 3 ]; do NUM="$NUM.0"; done
-          else
-            NUM="0.0.0.${{ github.run_number }}"
+          if [ -z "$NUM" ]; then NUM="0.0.0"; fi
+
+          # Pad to exactly three components BEFORE cutting. `cut -d. -f2`
+          # returns the whole line when the delimiter is absent, so a version
+          # of "1" would otherwise come out as 1.1.1.<run>.
+          while [ "$(printf '%s' "$NUM" | tr -cd '.' | wc -c)" -lt 2 ]; do
+            NUM="$NUM.0"
+          done
+          A=$(printf '%s' "$NUM" | cut -d. -f1)
+          B=$(printf '%s' "$NUM" | cut -d. -f2)
+          C=$(printf '%s' "$NUM" | cut -d. -f3)
+
+          # Every component must be <= 65535 or ISCC rejects it. Rather than
+          # clamp -- which would silently turn a CalVer 20260904.1 into
+          # 65535.1.0.x and assert a version that is not the version -- say
+          # plainly that the number is unrepresentable and fall back.
+          if [ "$A" -gt 65535 ] || [ "$B" -gt 65535 ] || [ "$C" -gt 65535 ]; then
+            echo "note: $NUM has a component above 65535, which the Windows"
+            echo "      file-version resource cannot hold. Falling back to 0.0.0."
+            echo "      AppVersion still carries the real version, $VERSION."
+            A=0; B=0; C=0
           fi
+
+          # modulo, not clamp, so consecutive builds keep distinct 4th slots
+          D=$((RUN_NUMBER % 65536))
+          VERSION_INFO="$A.$B.$C.$D"
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "version_info=$NUM" >> "$GITHUB_OUTPUT"
-          echo "version = $VERSION   version_info = $NUM"
+          echo "version_info=$VERSION_INFO" >> "$GITHUB_OUTPUT"
+          echo "version = $VERSION   version_info = $VERSION_INFO"
 
       - name: Build
         shell: bash
@@ -118,8 +164,22 @@ jobs:
     name: build installer
     needs: build
     runs-on: windows-2025
+    env:
+      # Pinned like every action in this file. Inno Setup is the one tool that
+      # decides what users actually download, so it should not float: a 6.x
+      # point release can change compression or [Code] semantics with no diff
+      # to review, and an Inno Setup 7 would install to a different directory
+      # and break the path below with no repo change at all.
+      INNO_VERSION: "6.7.3"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # this job needs only ekode.iss and the LICENSE it references, not a
+          # 236 MB tree
+          sparse-checkout: |
+            packages/opencode/installer
+            LICENSE
+          sparse-checkout-cone-mode: false
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -129,21 +189,28 @@ jobs:
       - name: Install Inno Setup
         shell: pwsh
         run: |
-          choco install innosetup --no-progress -y
+          choco install innosetup --version=$env:INNO_VERSION --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup exited $LASTEXITCODE" }
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
-          & $iscc /? | Select-Object -First 1
+          "ISCC: $iscc"
 
       - name: Compile installer
         shell: pwsh
+        env:
+          # through env, not ${{ }} in the script body: PowerShell runs $( )
+          # inside double-quoted strings, so an interpolated version string
+          # would execute here as well as in the bash step that produced it
+          APP_VERSION: ${{ needs.build.outputs.version }}
+          VERSION_INFO: ${{ needs.build.outputs.version_info }}
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $src = (Resolve-Path "build/bin").Path
           $out = (Resolve-Path "dist").Path
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
             "/DSourceDir=$src" `
-            "/DAppVersion=${{ needs.build.outputs.version }}" `
-            "/DVersionInfo=${{ needs.build.outputs.version_info }}" `
+            "/DAppVersion=$($env:APP_VERSION)" `
+            "/DVersionInfo=$($env:VERSION_INFO)" `
             "/DOutputDir=$out" `
             "packages\opencode\installer\ekode.iss"
           if ($LASTEXITCODE -ne 0) { throw "ISCC exited $LASTEXITCODE" }
@@ -151,11 +218,20 @@ jobs:
 
       # --- code signing slots in here -------------------------------------
       # Upstream signs with Azure Artifact Signing (formerly Trusted Signing);
-      # see publish.yml:120-218 for the working shape. It needs an Artifact
-      # Signing account plus a Public Trust certificate profile, which requires
-      # an *organisation* identity validation. Until that identity is settled,
-      # this step stays absent rather than half-wired, and every download shows
-      # "Windows protected your PC".
+      # publish.yml:120-218 has the working shape to copy.
+      #
+      # Publisher identity is decided: "Eko AI". AppPublisher in ekode.iss is
+      # set to match, so the wizard, Add/Remove Programs and the eventual
+      # certificate all say one thing.
+      #
+      # Still blocked on the Public Trust certificate profile, which needs an
+      # *organisation* identity validation for Eko AI -- registered entity,
+      # documents issued in the last 12 months, matching name, address and
+      # domain registration. The Azure subscription paying for it does not have
+      # to be the same entity, but the validated identity is what lands on the
+      # certificate. The step stays absent rather than half-wired until that
+      # profile exists; until then every download shows "Windows protected your
+      # PC" and SHA256SUMS.txt in the release is the only integrity check.
       # --------------------------------------------------------------------
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -170,6 +246,10 @@ jobs:
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # only verify-uninstall.ps1 is needed here
+          sparse-checkout: packages/opencode/installer
+          sparse-checkout-cone-mode: false
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

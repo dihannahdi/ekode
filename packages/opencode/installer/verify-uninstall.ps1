@@ -113,10 +113,24 @@ function Invoke-Native([scriptblock]$Command) {
   try { & $Command } finally { $ErrorActionPreference = $prev }
 }
 
+function Get-FreshPath {
+  # The PATH a newly spawned process would receive: machine first, then user,
+  # read live rather than inherited.
+  $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
+  $user = [Environment]::GetEnvironmentVariable("Path", "User")
+  ($machine, $user | Where-Object { $_ }) -join ";"
+}
+
 function Get-WhereExe {
   $exe = [System.IO.Path]::GetFileNameWithoutExtension($ExeName)
+  # Resolve against the freshly built PATH, not this process's own. $env:PATH
+  # was captured before the install and never changes, so resolving against it
+  # would return nothing in all three snapshots -- a field that reads as
+  # coverage while proving nothing. Against the live registry PATH the field
+  # actually moves: absent, present, absent.
+  $fresh = Get-FreshPath
   # redirect inside cmd so the stderr text never reaches PowerShell at all
-  $r = Invoke-Native { & cmd.exe /c "where $exe 2>nul" }
+  $r = Invoke-Native { & cmd.exe /c "set `"PATH=$fresh`" && where $exe 2>nul" }
   if ($LASTEXITCODE -ne 0) { return @() }
   @($r) | Sort-Object
 }
@@ -178,6 +192,16 @@ Write-Host "=== 1/3 baseline ==="
 if (Test-Path -LiteralPath $InstallDir) {
   throw "$InstallDir already exists. Uninstall ekode first; this check needs a clean start."
 }
+# A stale PATH entry with the directory already gone would make the install a
+# no-op (EnvAddPath's guard finds it present) while the uninstall still removes
+# it -- so snapshot 3 would differ from snapshot 1 by a *deletion*, reported as
+# "unclean uninstall" and pointing at a leftover that is nothing of the kind.
+$basePath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($basePath -and $basePath -like "*$InstallDir\bin*") {
+  throw ("HKCU PATH already contains $InstallDir\bin while $InstallDir does not exist. " +
+    "Remove that PATH entry first; left in place it makes the install a no-op and this " +
+    "check would report the uninstall's own removal as a leftover.")
+}
 $before = New-Snapshot "1-before"
 
 # ----------------------------------------------------------------- 2. install
@@ -214,9 +238,7 @@ if ($LASTEXITCODE -ne 0) { throw "$exePath --version exited $LASTEXITCODE" }
 # bare command, the way a user's next terminal will. This process inherited its
 # PATH before the install, so rebuild it from the registry the way Windows does
 # for a freshly spawned process: machine PATH, then user PATH.
-$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-$freshPath = ($machinePath, $userPath | Where-Object { $_ }) -join ";"
+$freshPath = Get-FreshPath
 $bare = [System.IO.Path]::GetFileNameWithoutExtension($ExeName)
 $probe = Start-Process -FilePath "cmd.exe" -Wait -PassThru -NoNewWindow `
   -ArgumentList "/c", "set `"PATH=$freshPath`" && $bare --version"
@@ -232,9 +254,14 @@ $uninst = Get-ChildItem -LiteralPath $InstallDir -Filter "unins*.exe" -File |
 if (-not $uninst) { throw "No uninstaller found in $InstallDir" }
 
 $uninstallLog = Join-Path $WorkDir "uninstall.log"
-Start-Process -FilePath $uninst.FullName -Wait -ArgumentList @(
+# -PassThru so the exit code is actually checked, the same way the install at
+# the top of this section is. Without it a uninstaller that fails outright
+# shows up only as Wait-For timing out 180 s later, blaming the wrong thing --
+# and one that returns non-zero but does delete the directory passes silently.
+$pu = Start-Process -FilePath $uninst.FullName -Wait -PassThru -ArgumentList @(
   "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LOG=$uninstallLog"
-) | Out-Null
+)
+if ($pu.ExitCode -ne 0) { throw "Uninstaller exited $($pu.ExitCode). Log: $uninstallLog" }
 # Inno's uninstaller re-launches itself from %TEMP% and the first process exits
 # immediately, so -Wait alone is not enough. Wait for the directory to go.
 Wait-For { -not (Test-Path -LiteralPath $InstallDir) } "install dir removed" 180

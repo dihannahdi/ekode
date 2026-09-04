@@ -25,7 +25,10 @@
 
 #define AppName "Ekode"
 #define AppExeName "ekode.exe"
-#define AppPublisher "Ekode"
+; Must match the legal entity on the code-signing certificate. Two different
+; publisher strings for one artifact -- one in Add/Remove Programs, another on
+; the SmartScreen dialog -- is exactly what users are told to distrust.
+#define AppPublisher "Eko AI"
 #define AppUrl "https://github.com/jaycoolslm/ekode"
 
 [Setup]
@@ -90,6 +93,7 @@ const
   KEY_READ_ = $20019;
   REG_SZ_TYPE = 1;
   REG_EXPAND_SZ_TYPE = 2;
+  KIND_UNKNOWN = -1;
 
 { Inno's Reg* functions read REG_SZ and REG_EXPAND_SZ identically and give no
   way to tell which one a value is. That matters: writing PATH back as
@@ -105,13 +109,21 @@ function RegQueryValueExW(hKey: Integer; lpValueName: string; lpReserved: Intege
 function RegCloseKey(hKey: Integer): Integer;
   external 'RegCloseKey@advapi32.dll stdcall';
 
-{ Registry type of HKCU\Environment\Path: 1 = REG_SZ, 2 = REG_EXPAND_SZ,
-  0 = absent or unreadable. }
+{ Registry type of HKCU\Environment\Path.
+    1  = REG_SZ
+    2  = REG_EXPAND_SZ
+    0  = the value does not exist
+   -1  = could not be determined
+
+  0 and -1 must stay distinct. Folding "could not determine" into the
+  "does not exist" default would write REG_EXPAND_SZ over an unknown type --
+  the precise corruption this function exists to prevent, and invisible on CI,
+  whose PATH is already REG_EXPAND_SZ. }
 function PathValueKind(): Integer;
 var
   hKey, ValType, DataSize: Integer;
 begin
-  Result := 0;
+  Result := KIND_UNKNOWN;
   try
     if RegOpenKeyExW(HKCU_NATIVE, EnvironmentKey, 0, KEY_READ_, hKey) <> 0 then
       exit;
@@ -119,13 +131,28 @@ begin
     DataSize := 0;
     { lpData = NULL asks for the type and size only }
     if RegQueryValueExW(hKey, 'Path', 0, ValType, 0, DataSize) = 0 then
-      Result := ValType;
+      Result := ValType
+    else
+      { opened the key but the value is not there }
+      Result := 0;
     RegCloseKey(hKey);
   except
-    { if the import ever fails, fall through to the REG_EXPAND_SZ default
-      rather than aborting the install }
-    Result := 0;
+    Result := KIND_UNKNOWN;
   end;
+end;
+
+{ True when the PATH edit is safe to make. If the type cannot be read we cannot
+  put it back, so we decline to touch PATH at all rather than change something
+  the uninstaller cannot restore. The install still succeeds -- app, Start Menu
+  entry and Add/Remove Programs entry are all unaffected -- and because add is
+  skipped, remove finds nothing and stays symmetric. }
+function PathEditSafe(Kind: Integer): Boolean;
+begin
+  Result := Kind <> KIND_UNKNOWN;
+  if not Result then
+    Log('ekode: could not read the type of HKCU\Environment\Path; leaving PATH '
+      + 'untouched so the uninstall stays reversible. Add '
+      + ExpandConstant('{app}\bin') + ' to PATH by hand if you want it there.');
 end;
 
 procedure WritePathValue(Value: string; Kind: Integer);
@@ -151,6 +178,8 @@ var
   Kind: Integer;
 begin
   Kind := PathValueKind();
+  if not PathEditSafe(Kind) then
+    exit;
   if not RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Paths) then
     Paths := '';
 
@@ -173,6 +202,8 @@ var
   P, Kind: Integer;
 begin
   Kind := PathValueKind();
+  if not PathEditSafe(Kind) then
+    exit;
   if not RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Paths) then
     exit;
 
