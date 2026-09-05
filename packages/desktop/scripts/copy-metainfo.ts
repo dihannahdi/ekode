@@ -1,5 +1,5 @@
 import { resolveChannel } from "./utils"
-import { ISSUES_URL, REPO_URL } from "../src/product"
+import { ISSUES_URL, PUBLISHER, REPO_URL } from "../src/product"
 
 const arg = process.argv[2]
 const channel = arg === "dev" || arg === "beta" || arg === "prod" ? arg : resolveChannel()
@@ -18,8 +18,14 @@ const xml = `<?xml version="1.0" encoding="UTF-8"?>
   <name>${productName}</name>
   <summary>${summary}</summary>
 
-  <developer id="ly.anoma">
-    <name>Anomaly Innovations Inc.</name>
+  <!--
+    No developer id attribute. It was "ly.anoma", a reverse-DNS id derived
+    from Anomaly's own domain. Eko AI has no registered domain to derive one
+    from and inventing an identifier is worse than omitting an optional
+    attribute, so only the name is declared.
+  -->
+  <developer>
+    <name>${PUBLISHER}</name>
   </developer>
 
   <description>

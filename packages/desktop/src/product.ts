@@ -31,6 +31,20 @@ export const REPO_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}`
 export const ISSUES_URL = `${REPO_URL}/issues`
 
 /**
+ * The legal entity Ekowork is published under, as decided for code signing.
+ *
+ * Must stay equal to AppPublisher in packages/opencode/installer/ekode.iss,
+ * so the Windows installer wizard, Add/Remove Programs, the Linux store
+ * listing and the eventual certificate all say one thing.
+ *
+ * This replaced "Anomaly Innovations Inc." in the AppStream metainfo -- not a
+ * link but a company attribution, telling anyone reading the store page that
+ * opencode's company develops Ekowork. Found by running
+ * scripts/copy-metainfo.ts and reading the XML, not by greping for URLs.
+ */
+export const PUBLISHER = "Eko AI"
+
+/**
  * Where electron-builder publishes, and therefore where the shipped app looks
  * for its own updates.
  *
