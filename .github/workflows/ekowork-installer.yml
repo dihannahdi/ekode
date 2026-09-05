@@ -122,6 +122,16 @@ jobs:
         shell: bash
         env:
           OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+          # Packaging needs the same enlarged heap as the build, and for the
+          # same reason: the renderer bundle alone is ~5.8 MB with a ~12 MB
+          # source map, and electron-builder holds the file list in memory
+          # while it compresses. Running this locally on the default heap died
+          # with "FATAL ERROR: Ineffective mark-compacts near heap limit" after
+          # producing dist/win-unpacked but before the NSIS step -- a 354 MB
+          # directory, no installer. The step would fail loudly here rather
+          # than pass, but failing 50 minutes into a Windows runner is worth
+          # avoiding.
+          NODE_OPTIONS: --max-old-space-size=8192
           # Windows signing is wired but inert here: electron-builder calls
           # signWindows (electron-builder.config.ts:20), which runs
           # script/sign-windows.ps1, which exits 0 with "Skipping Windows

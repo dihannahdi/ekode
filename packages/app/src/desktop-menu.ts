@@ -1,4 +1,11 @@
-import { BUG_REPORT_URL, FEATURE_REQUEST_URL, UPSTREAM } from "@/product"
+// Relative, not "@/product". This file is pulled into the Electron *main*
+// bundle -- src/main/menu.ts imports DESKTOP_MENU from
+// @opencode-ai/app/desktop-menu -- and electron.vite.config.ts does not
+// register the "@/" alias for main, only for the renderer. It had no
+// imports at all before this one, which is why the gap never showed.
+// tsconfig resolves "@/" so typecheck passes either way; only the bundler
+// disagrees, so this has to be caught by building.
+import { BUG_REPORT_URL, FEATURE_REQUEST_URL, UPSTREAM } from "./product"
 
 export type DesktopMenuPlatform = "macos" | "windows"
 
