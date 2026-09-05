@@ -4,10 +4,9 @@
   "version": "1.17.10",
   "type": "module",
   "license": "MIT",
-  "homepage": "https://opencode.ai",
+  "homepage": "https://github.com/jaycoolslm/ekode",
   "author": {
-    "name": "Ekowork",
-    "email": "hello@opencode.ai"
+    "name": "Ekowork"
   },
   "scripts": {
     "typecheck": "tsgo -b",

@@ -6,8 +6,7 @@ import { usePlatform } from "@/context/platform"
 import { useSettings } from "@/context/settings"
 import { persisted } from "@/utils/persist"
 import { DialogReleaseNotes, type Highlight } from "@/components/dialog-release-notes"
-
-const CHANGELOG_URL = "https://opencode.ai/changelog.json"
+import { CHANGELOG_URL } from "@/product"
 
 type Store = {
   version?: string
@@ -166,6 +165,16 @@ export const { use: useHighlights, provider: HighlightsProvider } = createSimple
 
     const start = (previous: string) => {
       if (!settings.general.releaseNotes()) {
+        markSeen()
+        return
+      }
+
+      // Ekowork serves no changelog in this shape yet, so CHANGELOG_URL is
+      // undefined -- see @/product for why there is nothing to point it at.
+      // Skip the request entirely rather than fetch something that cannot
+      // parse. markSeen() matches the branch above: the feature being off is
+      // not a reason to re-offer it on the next launch.
+      if (!CHANGELOG_URL) {
         markSeen()
         return
       }

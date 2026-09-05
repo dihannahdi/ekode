@@ -5,6 +5,8 @@ import { promisify } from "node:util"
 
 import type { Configuration } from "electron-builder"
 
+import { PUBLISH_REPO, PUBLISH_REPO_BETA } from "./src/product"
+
 const execFileAsync = promisify(execFile)
 const packageDir = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(packageDir, "../..")
@@ -125,7 +127,7 @@ function getConfig() {
         appId,
         productName: "Ekowork Beta",
         protocols: { name: "Ekowork Beta", schemes: ["opencode"] },
-        publish: { provider: "github", owner: "anomalyco", repo: "opencode-beta", channel: "latest" },
+        publish: { provider: "github", ...PUBLISH_REPO_BETA, channel: "latest" },
         rpm: { packageName: "opencode-beta" },
       }
     }
@@ -135,7 +137,7 @@ function getConfig() {
         appId,
         productName: "Ekowork",
         protocols: { name: "Ekowork", schemes: ["opencode"] },
-        publish: { provider: "github", owner: "anomalyco", repo: "opencode", channel: "latest" },
+        publish: { provider: "github", ...PUBLISH_REPO, channel: "latest" },
         deb: { fpm: [legacyDesktopEntryFpm] },
         rpm: { packageName: "opencode", fpm: [legacyDesktopEntryFpm] },
       }

@@ -1,4 +1,5 @@
 import { resolveChannel } from "./utils"
+import { ISSUES_URL, REPO_URL } from "../src/product"
 
 const arg = process.argv[2]
 const channel = arg === "dev" || arg === "beta" || arg === "prod" ? arg : resolveChannel()
@@ -31,15 +32,17 @@ const xml = `<?xml version="1.0" encoding="UTF-8"?>
 
   <content_rating type="oars-1.1" />
 
-  <url type="bugtracker">https://github.com/anomalyco/opencode/issues</url>
-  <url type="homepage">https://opencode.ai</url>
-  <url type="vcs-browser">https://github.com/anomalyco/opencode</url>
+  <url type="bugtracker">${ISSUES_URL}</url>
+  <url type="homepage">${REPO_URL}</url>
+  <url type="vcs-browser">${REPO_URL}</url>
 
-  <screenshots>
-    <screenshot type="default">
-      <image>https://raw.githubusercontent.com/anomalyco/opencode/b75d4d1c5ec449585d515c756fc81f080a157a9a/packages/web/src/assets/lander/screenshot.png</image>
-    </screenshot>
-  </screenshots>
+  <!--
+    No <screenshots> block. The one here showed opencode's lander image,
+    pinned to an upstream commit, on a listing titled "Ekowork" -- a store
+    page presenting another product's screenshot as this one. AppStream
+    treats screenshots as optional, so omitting it costs a nicer listing and
+    keeps the listing truthful. Add one showing Ekowork when there is one.
+  -->
 </component>
 `
 
