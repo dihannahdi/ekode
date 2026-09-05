@@ -5,7 +5,7 @@ import { promisify } from "node:util"
 
 import type { Configuration } from "electron-builder"
 
-import { PUBLISH_REPO, PUBLISH_REPO_BETA } from "./src/product"
+import { ARTIFACT_NAME, INSTALLER_ARTIFACT_NAME, PUBLISH_REPO, PUBLISH_REPO_BETA } from "./src/product"
 
 const execFileAsync = promisify(execFile)
 const packageDir = path.dirname(fileURLToPath(import.meta.url))
@@ -41,7 +41,7 @@ const APP_IDS = {
 } as const
 
 const getBase = (appId: string): Configuration => ({
-  artifactName: "opencode-desktop-${os}-${arch}.${ext}",
+  artifactName: ARTIFACT_NAME,
   directories: {
     output: "dist",
     buildResources: "resources",
@@ -88,6 +88,7 @@ const getBase = (appId: string): Configuration => ({
     verifyUpdateCodeSignature: false,
   },
   nsis: {
+    artifactName: INSTALLER_ARTIFACT_NAME,
     oneClick: true,
     perMachine: false,
     installerIcon: `resources/icons/icon.ico`,

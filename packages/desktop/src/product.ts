@@ -45,6 +45,22 @@ export const ISSUES_URL = `${REPO_URL}/issues`
 export const PUBLISHER = "Eko AI"
 
 /**
+ * Basename for everything electron-builder emits.
+ *
+ * The template was "opencode-desktop-${os}-${arch}.${ext}", so a fork build
+ * produced opencode-desktop-win-x64.exe -- a file called opencode, signed as
+ * Eko AI, installing an app named Ekowork. A filename is not a link, which is
+ * why the URL sweep did not catch it.
+ *
+ * The installer gets its own template with the version in it, matching what
+ * the ekode CLI installer already publishes (ekode-setup-0.0.1-rc6-x64.exe),
+ * so a downloads folder holding both makes sense. Other targets keep the
+ * os/arch form because a dmg or an AppImage is not a "setup".
+ */
+export const ARTIFACT_NAME = "ekowork-${os}-${arch}.${ext}"
+export const INSTALLER_ARTIFACT_NAME = "ekowork-setup-${version}-${arch}.${ext}"
+
+/**
  * Where electron-builder publishes, and therefore where the shipped app looks
  * for its own updates.
  *

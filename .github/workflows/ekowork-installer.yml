@@ -1,0 +1,316 @@
+name: ekowork-installer
+
+# Builds the Ekowork desktop app on a GitHub Windows runner and ships the NSIS
+# installer electron-builder produces.
+#
+# Separate from windows-installer.yml, which builds the ekode CLI with Inno
+# Setup. Different product, different toolchain, no shared files -- Ekowork is
+# Electron and electron-builder owns its own installer and uninstaller.
+#
+# Also separate from publish.yml, whose build-electron job is gated
+# `if: github.repository == 'anomalyco/opencode'` and runs on Blacksmith
+# runners this repo does not have. None of it executes in a fork, which is why
+# no Ekowork installer has ever been built here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string for the installer (default: 0.0.0-ci-<run number>)"
+        required: false
+        type: string
+  push:
+    tags:
+      # Deliberately NOT "v*". windows-installer.yml already claims that
+      # namespace for the ekode CLI. A shared pattern would run both workflows
+      # on one tag and have both call `gh release create` for it, racing to
+      # publish two different products into one release.
+      - "ekowork-v*"
+  pull_request:
+    # Only the files that decide what the installer *is*. Not
+    # packages/desktop/** -- a full Electron build takes tens of minutes, and
+    # GitHub bills Windows runners at 2x against this account's free-tier
+    # minutes. A PR touching renderer code does not need to repackage the app;
+    # windows-installer.yml scopes its own trigger the same way.
+    paths:
+      - ".github/workflows/ekowork-installer.yml"
+      - "packages/desktop/electron-builder.config.ts"
+      - "packages/desktop/scripts/**"
+      - "packages/desktop/src/product.ts"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a tag run: the release job uploads the exe and SHA256SUMS.txt
+  # as two calls, and a cancel between them leaves a release with the installer
+  # and no checksum.
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+permissions:
+  contents: read
+
+env:
+  # Read by three consumers, all of which need it and agree on "prod":
+  #   packages/desktop/scripts/utils.ts resolveChannel() -- dev|beta|prod only
+  #   packages/desktop/electron-builder.config.ts:32     -- picks appId/productName
+  #   packages/script/src/index.ts:27                    -- Script.channel
+  # "prod" is what makes electron-builder emit productName "Ekowork" and appId
+  # ai.opencode.desktop rather than the .dev variants, so CI builds the thing
+  # that ships rather than a near-miss of it.
+  OPENCODE_CHANNEL: prod
+
+jobs:
+  build:
+    name: build Ekowork installer (windows-x64)
+    runs-on: windows-2025
+    # No job-level `outputs`. Nothing downstream consumes the version: the
+    # release job addresses the release by github.ref_name, and the installer
+    # carries its own version in the filename. A declared-but-unread output is
+    # the kind of thing that reads as a wiring mistake later.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        env:
+          # Never interpolate a workflow input into a script body. GitHub
+          # substitutes the expression textually before bash parses the line,
+          # so a version of "$(curl ... | bash)" would execute on the runner.
+          # Passing it through env keeps it data.
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            # ekowork-v1.2.3 -> 1.2.3
+            VERSION="${GITHUB_REF_NAME#ekowork-v}"
+          elif [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="0.0.0-ci-$RUN_NUMBER"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version = $VERSION"
+
+      - name: Prepare
+        shell: bash
+        env:
+          # Without this, packages/script/src/index.ts:37 fetches
+          # registry.npmjs.org/opencode-ai/latest and derives Ekowork's version
+          # by bumping opencode's npm patch number. That is how
+          # packages/desktop/package.json came to say 1.17.10 -- a real
+          # opencode release, not an ekode one. Setting it makes the version
+          # ekode's own and skips the network call entirely.
+          OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+        run: bun ./scripts/prepare.ts
+        working-directory: packages/desktop
+
+      - name: Build
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+          OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+        # Sentry env vars are deliberately absent. Upstream's build passes
+        # SENTRY_AUTH_TOKEN and friends; this repo has no Sentry project, and
+        # the plugin no-ops without them rather than failing.
+        run: bun run build
+        working-directory: packages/desktop
+
+      - name: Package
+        shell: bash
+        env:
+          OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+          # Windows signing is wired but inert here: electron-builder calls
+          # signWindows (electron-builder.config.ts:20), which runs
+          # script/sign-windows.ps1, which exits 0 with "Skipping Windows
+          # signing because Azure Artifact Signing is not configured" when the
+          # AZURE_TRUSTED_SIGNING_* secrets are absent. The same Public Trust
+          # certificate profile blocking the ekode CLI installer blocks this
+          # one; when it exists, adding those three secrets is the whole change.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        # --publish never: the release job below owns publishing, so
+        # electron-builder must not push to GitHub itself.
+        run: npx electron-builder --win --publish never --config electron-builder.config.ts
+        working-directory: packages/desktop
+        timeout-minutes: 60
+
+      - name: Show what was built
+        shell: pwsh
+        run: |
+          $dir = "packages/desktop/dist"
+          if (-not (Test-Path $dir)) { throw "electron-builder produced nothing at $dir" }
+          Get-ChildItem $dir -File | Select-Object Name, Length | Format-Table -AutoSize
+          # -Filter goes through FindFirstFile, which also matches 8.3 short
+          # names, so "*.exe" can pick up ekowork-setup-x.exe.blockmap. Check
+          # the real extension rather than trusting the wildcard.
+          $exe = @(Get-ChildItem $dir -File | Where-Object {
+            $_.Extension -eq ".exe" -and $_.Name -like "ekowork-setup-*"
+          })
+          if ($exe.Count -eq 0) { throw "No ekowork-setup-*.exe in $dir" }
+          if ($exe.Count -gt 1) { throw "Expected one installer, found $($exe.Count)" }
+          Write-Host "installer: $($exe[0].Name)  $([math]::Round($exe[0].Length/1MB,1)) MB"
+
+          # electron-updater reads latest.yml from the release to decide
+          # whether an update exists, and the .blockmap to download only the
+          # changed bytes. Publishing the exe alone leaves the app pointed at
+          # PUBLISH_REPO with nothing there it can parse -- an update path that
+          # silently never fires, which is harder to notice than one that errors.
+          if (-not (Test-Path "$dir/latest.yml")) { throw "electron-builder produced no latest.yml" }
+          Get-Content "$dir/latest.yml"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ekowork-setup-windows-x64
+          path: |
+            packages/desktop/dist/ekowork-setup-*.exe
+            packages/desktop/dist/ekowork-setup-*.exe.blockmap
+            packages/desktop/dist/latest.yml
+          if-no-files-found: error
+
+  verify-uninstall:
+    name: verify clean uninstall
+    needs: build
+    runs-on: windows-2025
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ekowork-setup-windows-x64
+          path: dist
+
+      - name: Install, uninstall, diff
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # electron-builder's one-click NSIS installs per-user
+          # (nsis.perMachine = false), so everything lands under
+          # %LOCALAPPDATA%\Programs and HKCU. Nothing here touches HKLM or
+          # needs elevation, which is the point: a per-user installer cannot
+          # break the machine for anyone else. That is the failure this job
+          # exists to keep out.
+          $installRoot = Join-Path $env:LOCALAPPDATA "Programs\Ekowork"
+          $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
+          $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
+
+          function Get-State {
+            $entries = @(Get-ChildItem $uninstallKey -ErrorAction SilentlyContinue |
+              Where-Object { $_.GetValue("DisplayName") -like "*Ekowork*" } |
+              ForEach-Object { $_.PSChildName })
+            $links = @(Get-ChildItem $startMenu -Filter "*Ekowork*" -Recurse -ErrorAction SilentlyContinue |
+              ForEach-Object { $_.FullName })
+            [pscustomobject]@{
+              InstallDirExists = (Test-Path $installRoot)
+              UninstallEntries = $entries
+              StartMenu        = $links
+            }
+          }
+
+          $before = Get-State
+          Write-Host "=== before ==="; $before | Format-List
+
+          # Same 8.3 caveat as the build job: match on the real extension.
+          $exe = @(Get-ChildItem dist -File | Where-Object {
+            $_.Extension -eq ".exe" -and $_.Name -like "ekowork-setup-*"
+          })[0].FullName
+          Write-Host "installing $exe"
+          # /S is NSIS silent. electron-builder's one-click installer launches
+          # the app when it finishes, so stop it before uninstalling: a running
+          # exe holds its own files open and the uninstaller then leaves them
+          # behind, failing this check for the wrong reason.
+          Start-Process -FilePath $exe -ArgumentList "/S" -Wait
+          Start-Sleep -Seconds 10
+          Get-Process -Name "Ekowork" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 3
+
+          $after = Get-State
+          Write-Host "=== after install ==="; $after | Format-List
+          if (-not $after.InstallDirExists) { throw "Install produced no $installRoot" }
+          if ($after.UninstallEntries.Count -eq 0) { throw "Install registered no Add/Remove Programs entry" }
+
+          $uninstaller = Get-ChildItem $installRoot -Filter "Uninstall*.exe" -File |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $uninstaller) { throw "No uninstaller in $installRoot" }
+          Write-Host "uninstalling $uninstaller"
+          Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait
+          Start-Sleep -Seconds 10
+
+          $final = Get-State
+          Write-Host "=== after uninstall ==="; $final | Format-List
+
+          $problems = @()
+          if ($final.InstallDirExists) {
+            $left = @(Get-ChildItem $installRoot -Recurse -File -ErrorAction SilentlyContinue)
+            $problems += "install directory survived with $($left.Count) file(s): $installRoot"
+          }
+          if ($final.UninstallEntries.Count -ne $before.UninstallEntries.Count) {
+            $problems += "Add/Remove Programs entry left behind: $($final.UninstallEntries -join ', ')"
+          }
+          if ($final.StartMenu.Count -ne $before.StartMenu.Count) {
+            $problems += "Start Menu shortcut left behind: $($final.StartMenu -join ', ')"
+          }
+
+          if ($problems.Count -gt 0) {
+            Write-Host "=== uninstall did not come back clean ==="
+            $problems | ForEach-Object { Write-Host "  - $_" }
+            throw "Uninstall left $($problems.Count) remnant(s)"
+          }
+          Write-Host "Uninstall clean: install dir, Add/Remove entry and Start Menu all back to baseline."
+
+  release:
+    name: attach installer to the release
+    # Only a tag publishes. Everything else stops at the artifact.
+    if: github.ref_type == 'tag'
+    # verify-uninstall is in `needs` on purpose: an installer that failed the
+    # clean-uninstall check must not be able to reach a release.
+    needs:
+      - build
+      - verify-uninstall
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ekowork-setup-windows-x64
+          path: dist
+
+      - name: Checksum
+        working-directory: dist
+        run: |
+          ls -la
+          # The installer is unsigned, so this file is the only integrity check
+          # a user has. Keep publishing it even after signing is wired up.
+          sha256sum *.exe | tee SHA256SUMS.txt
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # semver: a hyphen means pre-release. Strip the ekowork-v prefix
+          # first, or every tag looks hyphenated and publishes as one.
+          VERSION="${TAG#ekowork-v}"
+          PRERELEASE=""
+          case "$VERSION" in
+            *-*) PRERELEASE="--prerelease" ;;
+          esac
+
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --verify-tag \
+              --generate-notes \
+              $PRERELEASE
+          fi
+          # latest.yml and the .blockmap go up with the exe: electron-updater
+          # needs both to see this release at all. See the note in the build
+          # job's "Show what was built" step.
+          gh release upload "$TAG" \
+            dist/*.exe dist/*.exe.blockmap dist/latest.yml dist/SHA256SUMS.txt \
+            --clobber --repo "$GITHUB_REPOSITORY"
+          echo "Published:"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | "  \(.name)  \(.size) bytes"'
